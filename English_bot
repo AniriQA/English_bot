@@ -1,100 +1,86 @@
-import os
-import json
-import random
-import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InputFile, ReplyKeyboardRemove
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from gtts import gTTS
 import logging
+import os
+import random
+import json
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from aiogram.types import InputFile
+from gtts import gTTS
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ---------- CONFIG ----------
-TOKEN = os.environ.get("TELEGRAM_TOKEN")  # <- ставим в Render как переменную окружения
-if not TOKEN:
-    logger.error("TELEGRAM_TOKEN is not set in environment variables.")
-    raise SystemExit("Set TELEGRAM_TOKEN environment variable")
-
+# ------------------ НАСТРОЙКА ------------------
+TOKEN = os.getenv("TOKEN")  # токен берём из переменных окружения
 WORDS_FILE = "words.json"
 
-# ---------- LOAD / SAVE ----------
+# ------------------ ЛОГИ ------------------
+logging.basicConfig(level=logging.INFO)
+
+# ------------------ ИНИЦИАЛИЗАЦИЯ ------------------
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
+
+# ------------------ ЗАГРУЗКА СЛОВАРЯ ------------------
 if os.path.exists(WORDS_FILE):
     with open(WORDS_FILE, "r", encoding="utf-8") as f:
         words = json.load(f)
 else:
-    words = {}
+    words = {}  # структура: { "english": "русский" }
 
+# ------------------ СОХРАНЕНИЕ ------------------
 def save_words():
     with open(WORDS_FILE, "w", encoding="utf-8") as f:
         json.dump(words, f, ensure_ascii=False, indent=2)
 
-# ---------- BOT INIT ----------
-bot = Bot(token=TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# ------------------ КОМАНДЫ ------------------
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    await message.reply(
+        "Привет! Я бот для изучения английских слов.\n\n"
+        "Команды:\n"
+        "/add - добавить слово\n"
+        "/quiz - квиз (англ → рус)\n"
+        "/quiz_reverse - квиз (рус → англ)\n"
+        "/list - посмотреть словарь"
+    )
 
-# ---------- FSM ----------
-class AddWordState(StatesGroup):
-    waiting_for_word = State()
+# ------------------ ДОБАВЛЕНИЕ СЛОВ ------------------
+@dp.message_handler(commands=['add'])
+async def add(message: types.Message):
+    await message.reply("Введите слово и перевод через дефис (пример: apple-яблоко):")
 
-# ---------- Handlers ----------
-@dp.message()
-async def start_handler(message: types.Message):
-    if message.text == "/start":
-        await message.answer(
-            "Привет! Я бот для изучения английских слов.\n\n"
-            "Команды:\n"
-            "/add - добавить слово\n"
-            "/quiz - квиз (англ → рус)\n"
-            "/quiz_reverse - квиз (рус → англ)\n"
-            "/list - посмотреть словарь"
-        )
-
-@dp.message()
-async def add_command(message: types.Message, state: FSMContext):
-    if message.text == "/add":
-        await message.answer("Введите слово и перевод через дефис (пример: apple-яблоко):")
-        await state.set_state(AddWordState.waiting_for_word)
-
-@dp.message(AddWordState.waiting_for_word)
-async def receive_word(message: types.Message, state: FSMContext):
-    text = message.text.strip()
-    if "-" not in text:
-        await message.reply("Неверный формат. Используйте: английское-русский")
-        return
-    eng, rus = text.split("-", 1)
-    eng = eng.strip()
-    rus = rus.strip()
-    if eng in words:
-        await message.reply(f"Слово '{eng}' уже есть. Перезаписываю перевод.")
-    words[eng] = rus
-    save_words()
-    await message.reply(f"Слово '{eng}' → '{rus}' добавлено!")
-    await state.clear()
-
-@dp.message()
-async def list_words(message: types.Message):
-    if message.text == "/list":
-        if not words:
-            await message.reply("Словарь пуст!")
+    @dp.message_handler()
+    async def receive_word(msg: types.Message):
+        text = msg.text.strip()
+        if "-" not in text:
+            await msg.reply("Неверный формат. Используйте: английское-русский")
             return
-        reply = "\n".join([f"{eng} → {rus}" for eng, rus in words.items()])
-        await message.answer(reply)
+        eng, rus = text.split("-", 1)
+        eng = eng.strip()
+        rus = rus.strip()
+        words[eng] = rus
+        save_words()
+        await msg.reply(f"Слово '{eng}' → '{rus}' добавлено!")
 
+# ------------------ ПРОСМОТР СЛОВАРЯ ------------------
+@dp.message_handler(commands=['list'])
+async def list_words(message: types.Message):
+    if not words:
+        await message.reply("Словарь пуст!")
+        return
+    reply = "\n".join([f"{eng} → {rus}" for eng, rus in words.items()])
+    await message.reply(reply)
+
+# ------------------ КВИЗ ------------------
 async def send_quiz(message: types.Message, reverse=False):
     if len(words) < 2:
-        await message.answer("Добавьте хотя бы 2 слова для квиза!")
+        await message.reply("Добавьте хотя бы 2 слова для квиза!")
         return
 
     eng = random.choice(list(words.keys()))
     rus = words[eng]
 
+    options = []
     correct = rus if not reverse else eng
-    options = [correct]
+    options.append(correct)
     while len(options) < 4:
         w = random.choice(list(words.keys()))
         val = w if reverse else words[w]
@@ -102,44 +88,38 @@ async def send_quiz(message: types.Message, reverse=False):
             options.append(val)
     random.shuffle(options)
 
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
     for opt in options:
         keyboard.add(opt)
 
     question = eng if not reverse else rus
-    await message.answer(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
+    await message.reply(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
 
+    # озвучка английского слова (только прямой квиз)
     if not reverse:
         tts = gTTS(text=eng, lang='en')
         tts.save("word.mp3")
-        await message.answer_voice(InputFile("word.mp3"))
+        await message.reply_voice(InputFile("word.mp3"))
         os.remove("word.mp3")
 
-@dp.message()
-async def quiz_handler(message: types.Message):
-    if message.text == "/quiz":
-        await send_quiz(message, reverse=False)
-    elif message.text == "/quiz_reverse":
-        await send_quiz(message, reverse=True)
+@dp.message_handler(commands=['quiz'])
+async def quiz(message: types.Message):
+    await send_quiz(message, reverse=False)
 
-@dp.message()
+@dp.message_handler(commands=['quiz_reverse'])
+async def quiz_reverse(message: types.Message):
+    await send_quiz(message, reverse=True)
+
+# ------------------ ПРОВЕРКА ОТВЕТОВ ------------------
+@dp.message_handler()
 async def check_answer(message: types.Message):
-    text = message.text.strip()
+    user_answer = message.text.strip()
     for eng, rus in words.items():
-        if text == eng or text == rus:
-            await message.answer(f"Верно! '{eng}' → '{rus}'", reply_markup=ReplyKeyboardRemove())
+        if user_answer == rus or user_answer == eng:
+            await message.reply(f"Верно! '{eng}' → '{rus}'")
             return
-    if text.startswith("/"):
-        return
-    await message.answer("Неправильно 😕 Попробуй ещё раз!")
+    await message.reply("Неправильно 😕 Попробуй ещё раз!")
 
-# ---------- RUN ----------
-async def main():
-    logger.info("Starting bot...")
-    await dp.start_polling(bot)
-
+# ------------------ ЗАПУСК ------------------
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped")
+    executor.start_polling(dp, skip_updates=True)
