@@ -1,0 +1,128 @@
+import json
+import random
+import os
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InputFile
+from aiogram.utils import executor
+from gtts import gTTS
+
+# ------------------ НАСТРОЙКА ------------------
+TOKEN = "ВАШ_ТОКЕН_ЗДЕСЬ"  # вставьте токен от BotFather
+WORDS_FILE = "words.json"
+
+# ------------------ ЗАГРУЗКА СЛОВАРЯ ------------------
+if os.path.exists(WORDS_FILE):
+    with open(WORDS_FILE, "r", encoding="utf-8") as f:
+        words = json.load(f)
+else:
+    words = {}  # структура: { "english": "русский" }
+
+# ------------------ СОХРАНЕНИЕ ------------------
+def save_words():
+    with open(WORDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(words, f, ensure_ascii=False, indent=2)
+
+# ------------------ ИНИЦИАЛИЗАЦИЯ БОТА ------------------
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
+
+# ------------------ КОМАНДЫ ------------------
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    await message.reply(
+        "Привет! Я бот для изучения английских слов.\n\n"
+        "Команды:\n"
+        "/add - добавить слово\n"
+        "/quiz - квиз (англ → рус)\n"
+        "/quiz_reverse - квиз (рус → англ)\n"
+        "/list - посмотреть словарь"
+    )
+
+# ------------------ ДОБАВЛЕНИЕ СЛОВ ------------------
+@dp.message_handler(commands=['add'])
+async def add(message: types.Message):
+    await message.reply("Введите слово и перевод через дефис (пример: apple-яблоко):")
+
+    @dp.message_handler()
+    async def receive_word(msg: types.Message):
+        text = msg.text.strip()
+        if "-" not in text:
+            await msg.reply("Неверный формат. Используйте: английское-русский")
+            return
+        eng, rus = text.split("-", 1)
+        eng = eng.strip()
+        rus = rus.strip()
+        words[eng] = rus
+        save_words()
+        await msg.reply(f"Слово '{eng}' → '{rus}' добавлено!")
+
+# ------------------ ПРОСМОТР СЛОВАРЯ ------------------
+@dp.message_handler(commands=['list'])
+async def list_words(message: types.Message):
+    if not words:
+        await message.reply("Словарь пуст!")
+        return
+    reply = "\n".join([f"{eng} → {rus}" for eng, rus in words.items()])
+    await message.reply(reply)
+
+# ------------------ КВИЗ ------------------
+async def send_quiz(message: types.Message, reverse=False):
+    if len(words) < 2:
+        await message.reply("Добавьте хотя бы 2 слова для квиза!")
+        return
+
+    eng = random.choice(list(words.keys()))
+    rus = words[eng]
+
+    # варианты ответов
+    options = []
+    correct = rus if not reverse else eng
+    options.append(correct)
+    while len(options) < 4:
+        w = random.choice(list(words.keys()))
+        val = w if reverse else words[w]
+        if val not in options:
+            options.append(val)
+    random.shuffle(options)
+
+    # клавиатура
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    for opt in options:
+        keyboard.add(opt)
+
+    question = eng if not reverse else rus
+    await message.reply(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
+
+    # озвучка английского слова (только прямой квиз)
+    if not reverse:
+        tts = gTTS(text=eng, lang='en')
+        tts.save("word.mp3")
+        await message.reply_voice(InputFile("word.mp3"))
+        os.remove("word.mp3")
+
+# Квиз команды
+@dp.message_handler(commands=['quiz'])
+async def quiz(message: types.Message):
+    await send_quiz(message, reverse=False)
+
+@dp.message_handler(commands=['quiz_reverse'])
+async def quiz_reverse(message: types.Message):
+    await send_quiz(message, reverse=True)
+
+# ------------------ ОБРАБОТКА ОТВЕТОВ ------------------
+@dp.message_handler()
+async def check_answer(message: types.Message):
+    user_answer = message.text.strip()
+    # Проверяем, есть ли такой перевод
+    for eng, rus in words.items():
+        if user_answer == rus:
+            await message.reply(f"Верно! '{eng}' → '{rus}'")
+            return
+        if user_answer == eng:
+            await message.reply(f"Верно! '{eng}' → '{rus}'")
+            return
+    await message.reply("Неправильно 😕 Попробуй ещё раз!")
+
+# ------------------ ЗАПУСК ------------------
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True)
