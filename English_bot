@@ -7,7 +7,7 @@ from aiogram.utils import executor
 from gtts import gTTS
 
 # ------------------ НАСТРОЙКА ------------------
-TOKEN = "ВАШ_ТОКЕН_ЗДЕСЬ"  # вставьте токен от BotFather
+TOKEN = "7791881194:AAGkSL01iZG7Lmko_7FOTJ69zgdPbo-2WIk"  # вставьте токен от BotFather
 WORDS_FILE = "words.json"
 
 # ------------------ ЗАГРУЗКА СЛОВАРЯ ------------------
