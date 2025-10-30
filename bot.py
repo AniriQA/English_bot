@@ -8,7 +8,7 @@ from aiogram.types import Message, InputFile
 from gtts import gTTS
 
 # ------------------ НАСТРОЙКА ------------------
-TOKEN = os.getenv("TOKEN")  # токен берём из переменных окружения
+TOKEN = os.getenv("TOKEN")  # токен из переменных окружения
 WORDS_FILE = "words.json"
 
 # ------------------ ЛОГИ ------------------
@@ -30,20 +30,8 @@ def save_words():
     with open(WORDS_FILE, "w", encoding="utf-8") as f:
         json.dump(words, f, ensure_ascii=False, indent=2)
 
-# ------------------ КОМАНДЫ ------------------
-@dp.message(Command(commands=["start"]))
-async def start(message: Message):
-    await message.answer(
-        "Привет! Я бот для изучения английских слов.\n\n"
-        "Команды:\n"
-        "/add - добавить слово\n"
-        "/quiz - квиз (англ → рус)\n"
-        "/quiz_reverse - квиз (рус → англ)\n"
-        "/list - посмотреть словарь"
-    )
-
 # ------------------ ДОБАВЛЕНИЕ СЛОВ ------------------
-adding_word_users = set()  # чтобы помнить, кто вводит слово
+adding_word_users = set()  # кто вводит слово
 
 @dp.message(Command(commands=["add"]))
 async def add(message: Message):
@@ -53,7 +41,7 @@ async def add(message: Message):
 @dp.message()
 async def receive_word(message: Message):
     if message.from_user.id not in adding_word_users:
-        return  # пропускаем, если это не ввод слова
+        return
     text = message.text.strip()
     if "-" not in text:
         await message.answer("Неверный формат. Используйте: английское-русский")
@@ -76,6 +64,8 @@ async def list_words(message: Message):
     await message.answer(reply)
 
 # ------------------ КВИЗ ------------------
+current_quiz = {}  # {user_id: (eng, rus, reverse)}
+
 async def send_quiz(message: Message, reverse=False):
     if len(words) < 2:
         await message.answer("Добавьте хотя бы 2 слова для квиза!")
@@ -108,6 +98,8 @@ async def send_quiz(message: Message, reverse=False):
         await message.answer_voice(InputFile("word.mp3"))
         os.remove("word.mp3")
 
+    current_quiz[message.from_user.id] = (eng, rus, reverse)
+
 @dp.message(Command(commands=["quiz"]))
 async def quiz(message: Message):
     await send_quiz(message, reverse=False)
@@ -119,12 +111,37 @@ async def quiz_reverse(message: Message):
 # ------------------ ПРОВЕРКА ОТВЕТОВ ------------------
 @dp.message()
 async def check_answer(message: Message):
+    user_id = message.from_user.id
+    if user_id not in current_quiz:
+        return  # нет активного квиза
+
+    eng, rus, reverse = current_quiz[user_id]
     user_answer = message.text.strip()
-    for eng, rus in words.items():
-        if user_answer == rus or user_answer == eng:
-            await message.answer(f"Верно! '{eng}' → '{rus}'")
-            return
-    await message.answer("Неправильно 😕 Попробуй ещё раз!")
+
+    correct = rus if not reverse else eng
+    if user_answer == correct:
+        await message.answer(f"Верно! '{eng}' → '{rus}'")
+    else:
+        await message.answer(f"Неправильно 😕. Правильный ответ: '{correct}'\nСлово удалено из словаря.")
+        # удаляем слово из словаря, если ответ неверный
+        if not reverse and eng in words:
+            del words[eng]
+            save_words()
+
+    # удаляем текущий квиз
+    del current_quiz[user_id]
+
+# ------------------ СТАРТ ------------------
+@dp.message(Command(commands=["start"]))
+async def start(message: Message):
+    await message.answer(
+        "Привет! Я бот для изучения английских слов.\n\n"
+        "Команды:\n"
+        "/add - добавить слово\n"
+        "/quiz - квиз (англ → рус)\n"
+        "/quiz_reverse - квиз (рус → англ)\n"
+        "/list - посмотреть словарь"
+    )
 
 # ------------------ ЗАПУСК ------------------
 if __name__ == "__main__":
