@@ -1,7 +1,9 @@
 services:
-  - type: worker
-    name: English_bot
+  - type: web
+    name: english_bot
     env: python
+    plan: free
+    pythonVersion: 3.11.8   # обязательно укажи полный патч
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
-    pythonVersion: 3.11.9
+
