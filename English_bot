@@ -3,8 +3,8 @@ import os
 import random
 import json
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
-from aiogram.types import InputFile
+from aiogram.filters import Command
+from aiogram.types import Message, InputFile
 from gtts import gTTS
 
 # ------------------ НАСТРОЙКА ------------------
@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ------------------ ИНИЦИАЛИЗАЦИЯ ------------------
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
 # ------------------ ЗАГРУЗКА СЛОВАРЯ ------------------
 if os.path.exists(WORDS_FILE):
@@ -31,9 +31,9 @@ def save_words():
         json.dump(words, f, ensure_ascii=False, indent=2)
 
 # ------------------ КОМАНДЫ ------------------
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message):
-    await message.reply(
+@dp.message(Command(commands=["start"]))
+async def start(message: Message):
+    await message.answer(
         "Привет! Я бот для изучения английских слов.\n\n"
         "Команды:\n"
         "/add - добавить слово\n"
@@ -43,36 +43,42 @@ async def start(message: types.Message):
     )
 
 # ------------------ ДОБАВЛЕНИЕ СЛОВ ------------------
-@dp.message_handler(commands=['add'])
-async def add(message: types.Message):
-    await message.reply("Введите слово и перевод через дефис (пример: apple-яблоко):")
+adding_word_users = set()  # чтобы помнить, кто вводит слово
 
-    @dp.message_handler()
-    async def receive_word(msg: types.Message):
-        text = msg.text.strip()
-        if "-" not in text:
-            await msg.reply("Неверный формат. Используйте: английское-русский")
-            return
-        eng, rus = text.split("-", 1)
-        eng = eng.strip()
-        rus = rus.strip()
-        words[eng] = rus
-        save_words()
-        await msg.reply(f"Слово '{eng}' → '{rus}' добавлено!")
+@dp.message(Command(commands=["add"]))
+async def add(message: Message):
+    await message.answer("Введите слово и перевод через дефис (пример: apple-яблоко):")
+    adding_word_users.add(message.from_user.id)
+
+@dp.message()
+async def receive_word(message: Message):
+    if message.from_user.id not in adding_word_users:
+        return  # пропускаем, если это не ввод слова
+    text = message.text.strip()
+    if "-" not in text:
+        await message.answer("Неверный формат. Используйте: английское-русский")
+        return
+    eng, rus = text.split("-", 1)
+    eng = eng.strip()
+    rus = rus.strip()
+    words[eng] = rus
+    save_words()
+    await message.answer(f"Слово '{eng}' → '{rus}' добавлено!")
+    adding_word_users.remove(message.from_user.id)
 
 # ------------------ ПРОСМОТР СЛОВАРЯ ------------------
-@dp.message_handler(commands=['list'])
-async def list_words(message: types.Message):
+@dp.message(Command(commands=["list"]))
+async def list_words(message: Message):
     if not words:
-        await message.reply("Словарь пуст!")
+        await message.answer("Словарь пуст!")
         return
     reply = "\n".join([f"{eng} → {rus}" for eng, rus in words.items()])
-    await message.reply(reply)
+    await message.answer(reply)
 
 # ------------------ КВИЗ ------------------
-async def send_quiz(message: types.Message, reverse=False):
+async def send_quiz(message: Message, reverse=False):
     if len(words) < 2:
-        await message.reply("Добавьте хотя бы 2 слова для квиза!")
+        await message.answer("Добавьте хотя бы 2 слова для квиза!")
         return
 
     eng = random.choice(list(words.keys()))
@@ -93,33 +99,37 @@ async def send_quiz(message: types.Message, reverse=False):
         keyboard.add(opt)
 
     question = eng if not reverse else rus
-    await message.reply(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
+    await message.answer(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
 
     # озвучка английского слова (только прямой квиз)
     if not reverse:
         tts = gTTS(text=eng, lang='en')
         tts.save("word.mp3")
-        await message.reply_voice(InputFile("word.mp3"))
+        await message.answer_voice(InputFile("word.mp3"))
         os.remove("word.mp3")
 
-@dp.message_handler(commands=['quiz'])
-async def quiz(message: types.Message):
+@dp.message(Command(commands=["quiz"]))
+async def quiz(message: Message):
     await send_quiz(message, reverse=False)
 
-@dp.message_handler(commands=['quiz_reverse'])
-async def quiz_reverse(message: types.Message):
+@dp.message(Command(commands=["quiz_reverse"]))
+async def quiz_reverse(message: Message):
     await send_quiz(message, reverse=True)
 
 # ------------------ ПРОВЕРКА ОТВЕТОВ ------------------
-@dp.message_handler()
-async def check_answer(message: types.Message):
+@dp.message()
+async def check_answer(message: Message):
     user_answer = message.text.strip()
     for eng, rus in words.items():
         if user_answer == rus or user_answer == eng:
-            await message.reply(f"Верно! '{eng}' → '{rus}'")
+            await message.answer(f"Верно! '{eng}' → '{rus}'")
             return
-    await message.reply("Неправильно 😕 Попробуй ещё раз!")
+    await message.answer("Неправильно 😕 Попробуй ещё раз!")
 
 # ------------------ ЗАПУСК ------------------
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    import asyncio
+    async def main():
+        await dp.start_polling(bot)
+
+    asyncio.run(main())
