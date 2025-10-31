@@ -5,7 +5,7 @@ import json
 import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InputFile, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, InputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from gtts import gTTS
 from aiohttp import web
 
@@ -63,7 +63,6 @@ async def list_words(message: Message):
         await message.answer("Словарь пуст!")
         return
 
-    # кнопки с буквами слов
     keyboard = InlineKeyboardMarkup(row_width=2, inline_keyboard=[])
     for eng, rus in words.items():
         keyboard.add(InlineKeyboardButton(text=f"{eng} → {rus}", callback_data="noop"))
@@ -98,7 +97,6 @@ async def send_quiz(message: Message, reverse=False):
     question = eng if not reverse else rus
     await message.answer(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
 
-    # озвучка английского слова (только прямой квиз)
     if not reverse:
         tts = gTTS(text=eng, lang='en')
         tts.save("word.mp3")
@@ -117,7 +115,7 @@ async def quiz_reverse(message: Message):
 
 # ------------------ ПРОВЕРКА ОТВЕТОВ ------------------
 @dp.callback_query(F.data.startswith("answer:"))
-async def check_answer_callback(callback):
+async def check_answer_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in current_quiz:
         await callback.answer("Сначала начните квиз командой /quiz или /quiz_reverse")
@@ -138,14 +136,15 @@ async def check_answer_callback(callback):
     del current_quiz[user_id]
     await callback.answer()
 
-# ------------------ СТАРТ ------------------
+# ------------------ СТАРТ И МЕНЮ ------------------
 @dp.message(Command(commands=["start"]))
 async def start(message: Message):
     keyboard = InlineKeyboardMarkup(row_width=2, inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить слово", callback_data="cmd:add")],
-        [InlineKeyboardButton(text="Квиз (англ → рус)", callback_data="cmd:quiz")],
-        [InlineKeyboardButton(text="Квиз (рус → англ)", callback_data="cmd:quiz_reverse")],
-        [InlineKeyboardButton(text="Посмотреть словарь", callback_data="cmd:list")]
+        [InlineKeyboardButton("➕ Добавить слово", callback_data="cmd:add"),
+         InlineKeyboardButton("🗑 Удалить слово", callback_data="cmd:delete")],
+        [InlineKeyboardButton("📝 Квиз (англ → рус)", callback_data="cmd:quiz"),
+         InlineKeyboardButton("🔄 Квиз (рус → англ)", callback_data="cmd:quiz_reverse")],
+        [InlineKeyboardButton("📚 Посмотреть словарь", callback_data="cmd:list")]
     ])
     await message.answer(
         "Привет! Я бот для изучения английских слов.\nВыбирай действие кнопками ниже:",
@@ -154,16 +153,43 @@ async def start(message: Message):
 
 # ------------------ ОБРАБОТКА КНОПОК СТАРТА ------------------
 @dp.callback_query(F.data.startswith("cmd:"))
-async def handle_start_buttons(callback):
+async def handle_start_buttons(callback: CallbackQuery):
     cmd = callback.data.split(":", 1)[1]
+    
     if cmd == "add":
         await add_word(callback.message)
+    
+    elif cmd == "delete":
+        if not words:
+            await callback.message.answer("Словарь пуст! Удалять нечего.")
+            await callback.answer()
+            return
+        keyboard = InlineKeyboardMarkup(row_width=1)
+        for eng in words.keys():
+            keyboard.add(InlineKeyboardButton(text=eng, callback_data=f"delete_word:{eng}"))
+        await callback.message.answer("Выберите слово для удаления:", reply_markup=keyboard)
+    
     elif cmd == "quiz":
         await send_quiz(callback.message, reverse=False)
+    
     elif cmd == "quiz_reverse":
         await send_quiz(callback.message, reverse=True)
+    
     elif cmd == "list":
         await list_words(callback.message)
+    
+    await callback.answer()
+
+# ------------------ УДАЛЕНИЕ СЛОВА ------------------
+@dp.callback_query(F.data.startswith("delete_word:"))
+async def delete_word_callback(callback: CallbackQuery):
+    eng = callback.data.split(":", 1)[1]
+    if eng in words:
+        del words[eng]
+        save_words()
+        await callback.message.answer(f"❌ Слово '{eng}' удалено из словаря.")
+    else:
+        await callback.message.answer(f"Слово '{eng}' не найдено.")
     await callback.answer()
 
 # ------------------ HTTP-заглушка для Render ------------------
