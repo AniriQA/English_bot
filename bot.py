@@ -9,6 +9,8 @@ from aiogram.types import Message, InputFile
 from gtts import gTTS
 from aiohttp import web
 
+
+
 # ------------------ НАСТРОЙКА ------------------
 TOKEN = os.getenv("BOT_TOKEN")  # токен задаётся в Render → Environment
 WORDS_FILE = "words.json"
@@ -132,8 +134,11 @@ async def check_answer(message: Message):
     del current_quiz[user_id]
 
 # ------------------ СТАРТ ------------------
+
+
 @dp.message(Command(commands=["start"]))
 async def start(message: Message):
+    print(f"START triggered by {message.from_user.id}")
     await message.answer(
         "Привет! Я бот для изучения английских слов.\n\n"
         "Команды:\n"
