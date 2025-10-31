@@ -2,13 +2,15 @@ import logging
 import os
 import random
 import json
+import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InputFile
 from gtts import gTTS
+from aiohttp import web
 
 # ------------------ НАСТРОЙКА ------------------
-TOKEN = os.getenv("TOKEN")  # токен из переменных окружения
+TOKEN = os.getenv("BOT_TOKEN")  # токен задаётся в Render → Environment
 WORDS_FILE = "words.json"
 
 # ------------------ ЛОГИ ------------------
@@ -120,15 +122,13 @@ async def check_answer(message: Message):
 
     correct = rus if not reverse else eng
     if user_answer == correct:
-        await message.answer(f"Верно! '{eng}' → '{rus}'")
+        await message.answer(f"✅ Верно! '{eng}' → '{rus}'")
     else:
-        await message.answer(f"Неправильно 😕. Правильный ответ: '{correct}'\nСлово удалено из словаря.")
-        # удаляем слово из словаря, если ответ неверный
+        await message.answer(f"❌ Неправильно. Правильный ответ: '{correct}'\nСлово удалено из словаря.")
         if not reverse and eng in words:
             del words[eng]
             save_words()
 
-    # удаляем текущий квиз
     del current_quiz[user_id]
 
 # ------------------ СТАРТ ------------------
@@ -143,10 +143,22 @@ async def start(message: Message):
         "/list - посмотреть словарь"
     )
 
-# ------------------ ЗАПУСК ------------------
-if __name__ == "__main__":
-    import asyncio
-    async def main():
-        await dp.start_polling(bot)
+# ------------------ HTTP-заглушка для Render ------------------
+async def handle(request):
+    return web.Response(text="Bot is alive!")
 
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    await site.start()
+
+# ------------------ ЗАПУСК ------------------
+async def main():
+    await start_web_server()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
     asyncio.run(main())
