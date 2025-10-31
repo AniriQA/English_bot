@@ -56,45 +56,46 @@ async def receive_word(message: Message):
     await message.answer(f"✅ Слово '{eng}' → '{rus}' добавлено!")
     adding_word_users.remove(message.from_user.id)
 
-# ------------------ УДАЛЕНИЕ СЛОВ ------------------
-@dp.message(Command(commands=["delete"]))
-async def delete_word(message: Message):
+# ------------------ ПРОСМОТР СЛОВАРЯ ------------------
+async def list_words_query(callback: CallbackQuery):
     if not words:
-        await message.answer("Словарь пуст!")
+        await callback.message.answer("Словарь пуст!")
         return
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=f"{eng} → {rus}", callback_data=f"del:{eng}")] for eng, rus in words.items()]
-    )
-    await message.answer("Выберите слово для удаления:", reply_markup=keyboard)
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    for eng, rus in words.items():
+        keyboard.add(
+            InlineKeyboardButton(text=f"{eng} → {rus}", callback_data=f"noop")
+        )
+    await callback.message.answer("Ваш словарь:", reply_markup=keyboard)
+
+# ------------------ УДАЛЕНИЕ СЛОВ ------------------
+async def delete_word_query(callback: CallbackQuery):
+    if not words:
+        await callback.message.answer("Словарь пуст!")
+        return
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    for eng, rus in words.items():
+        keyboard.add(
+            InlineKeyboardButton(text=f"{eng} → {rus}", callback_data=f"del:{eng}")
+        )
+    await callback.message.answer("Выберите слово для удаления:", reply_markup=keyboard)
 
 @dp.callback_query(F.data.startswith("del:"))
-async def confirm_delete(callback: CallbackQuery):
+async def handle_delete(callback: CallbackQuery):
     eng = callback.data.split(":", 1)[1]
     if eng in words:
         del words[eng]
         save_words()
-        await callback.message.answer(f"❌ Слово '{eng}' удалено из словаря.")
+        await callback.message.answer(f"✅ Слово '{eng}' удалено!")
     await callback.answer()
-
-# ------------------ ПРОСМОТР СЛОВАРЯ ------------------
-@dp.message(Command(commands=["list"]))
-async def list_words(message: Message):
-    if not words:
-        await message.answer("Словарь пуст!")
-        return
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=f"{eng} → {rus}", callback_data="noop")] for eng, rus in words.items()]
-    )
-    await message.answer("Ваш словарь:", reply_markup=keyboard)
 
 # ------------------ КВИЗ ------------------
 current_quiz = {}  # {user_id: (eng, rus, reverse)}
 
-async def send_quiz(message: Message, reverse=False):
+async def send_quiz_query(callback: CallbackQuery, reverse=False):
     if len(words) < 2:
-        await message.answer("Добавьте хотя бы 2 слова для квиза!")
+        await callback.message.answer("Добавьте хотя бы 2 слова для квиза!")
         return
 
     eng = random.choice(list(words.keys()))
@@ -110,36 +111,28 @@ async def send_quiz(message: Message, reverse=False):
             options.append(val)
     random.shuffle(options)
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=opt, callback_data=f"answer:{opt}")] for opt in options]
-    )
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    for opt in options:
+        keyboard.add(InlineKeyboardButton(text=opt, callback_data=f"answer:{opt}"))
 
     question = eng if not reverse else rus
-    await message.answer(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
+    await callback.message.answer(f"Выберите правильный перевод: {question}", reply_markup=keyboard)
 
     # озвучка английского слова (только прямой квиз)
     if not reverse:
         tts = gTTS(text=eng, lang='en')
         tts.save("word.mp3")
-        await message.answer_voice(InputFile("word.mp3"))
+        await callback.message.answer_voice(InputFile("word.mp3"))
         os.remove("word.mp3")
 
-    current_quiz[message.from_user.id] = (eng, rus, reverse)
+    current_quiz[callback.from_user.id] = (eng, rus, reverse)
+    await callback.answer()
 
-@dp.message(Command(commands=["quiz"]))
-async def quiz(message: Message):
-    await send_quiz(message, reverse=False)
-
-@dp.message(Command(commands=["quiz_reverse"]))
-async def quiz_reverse(message: Message):
-    await send_quiz(message, reverse=True)
-
-# ------------------ ПРОВЕРКА ОТВЕТОВ ------------------
 @dp.callback_query(F.data.startswith("answer:"))
 async def check_answer_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in current_quiz:
-        await callback.answer("Сначала начните квиз командой /quiz или /quiz_reverse")
+        await callback.answer("Сначала начните квиз кнопкой в меню")
         return
 
     eng, rus, reverse = current_quiz[user_id]
@@ -160,32 +153,33 @@ async def check_answer_callback(callback: CallbackQuery):
 # ------------------ СТАРТ ------------------
 @dp.message(Command(commands=["start"]))
 async def start(message: Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить слово", callback_data="cmd:add")],
-        [InlineKeyboardButton(text="Удалить слово", callback_data="cmd:delete")],
-        [InlineKeyboardButton(text="Квиз (англ → рус)", callback_data="cmd:quiz")],
-        [InlineKeyboardButton(text="Квиз (рус → англ)", callback_data="cmd:quiz_reverse")],
-        [InlineKeyboardButton(text="Посмотреть словарь", callback_data="cmd:list")]
-    ])
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton(text="Добавить слово", callback_data="cmd:add"),
+        InlineKeyboardButton(text="Удалить слово", callback_data="cmd:delete"),
+        InlineKeyboardButton(text="Квиз (англ → рус)", callback_data="cmd:quiz"),
+        InlineKeyboardButton(text="Квиз (рус → англ)", callback_data="cmd:quiz_reverse"),
+        InlineKeyboardButton(text="Посмотреть словарь", callback_data="cmd:list")
+    )
     await message.answer(
         "Привет! Я бот для изучения английских слов.\nВыбирай действие кнопками ниже:",
         reply_markup=keyboard
     )
 
-# ------------------ ОБРАБОТКА КНОПОК СТАРТА ------------------
+# ------------------ ОБРАБОТКА КНОПОК МЕНЮ ------------------
 @dp.callback_query(F.data.startswith("cmd:"))
 async def handle_start_buttons(callback: CallbackQuery):
     cmd = callback.data.split(":", 1)[1]
     if cmd == "add":
         await add_word(callback.message)
     elif cmd == "delete":
-        await delete_word(callback.message)
-    elif cmd == "quiz":
-        await send_quiz(callback.message, reverse=False)
-    elif cmd == "quiz_reverse":
-        await send_quiz(callback.message, reverse=True)
+        await delete_word_query(callback)
     elif cmd == "list":
-        await list_words(callback.message)
+        await list_words_query(callback)
+    elif cmd == "quiz":
+        await send_quiz_query(callback, reverse=False)
+    elif cmd == "quiz_reverse":
+        await send_quiz_query(callback, reverse=True)
     await callback.answer()
 
 # ------------------ HTTP-заглушка для Render ------------------
