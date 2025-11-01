@@ -1,359 +1,278 @@
+#!/usr/bin/env python3
+"""
+Telegram Bot для изучения английских слов
+Хранит словари пользователей в SQLite базе данных
+"""
+
 import logging
-import os
-import random
-import json
-import asyncio
-from typing import Dict, Tuple
+import re
+from html import escape
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ContextTypes, 
+    ConversationHandler
+)
+from bs4 import BeautifulSoup
 
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.types import Message, InputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from gtts import gTTS
-from aiohttp import web
+from database import VocabularyDatabase
 
-# ------------------ НАСТРОЙКА ------------------
-TOKEN = os.getenv("BOT_TOKEN")
-WORDS_FILE = "words.json"
-
-if not TOKEN:
-    raise ValueError("❌ BOT_TOKEN не найден!")
-
-# ------------------ ЛОГИ ------------------
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# ------------------ ИНИЦИАЛИЗАЦИЯ ------------------
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
+# Состояния для ConversationHandler
+ADDING_WORD = 1
 
-# ------------------ СЛОВАРЬ ------------------
-def load_words():
-    global words
-    try:
-        if os.path.exists(WORDS_FILE):
-            with open(WORDS_FILE, "r", encoding="utf-8") as f:
-                words = json.load(f)
-            logger.info(f"📚 Слов в словаре: {len(words)}")
-        else:
-            words = {
-                "hello": "привет",
-                "task": "задача",
-                "project": "проект", 
-                "team": "команда",
-                "deadline": "крайний срок",
-                "report": "отчет",
-                "solution": "решение",
-                "meeting": "совещание",
-                "request": "запрос",
-                "access": "доступ",
-                "apple": "яблоко",
-                "book": "книга"
-            }
-            with open(WORDS_FILE, "w", encoding="utf-8") as f:
-                json.dump(words, f, ensure_ascii=False, indent=2)
-            logger.info("📚 Создан новый словарь")
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки: {e}")
-        words = {}
+# Инициализация базы данных
+db = VocabularyDatabase()
 
-def save_words():
-    try:
-        with open(WORDS_FILE, "w", encoding="utf-8") as f:
-            json.dump(words, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"❌ Ошибка сохранения: {e}")
-
-# ------------------ СОСТОЯНИЯ ------------------
-adding_word_users = set()
-current_quiz: Dict[int, Tuple[str, str, bool]] = {}
-
-load_words()
-
-# ------------------ КЛАВИАТУРЫ ------------------
-def main_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="➕ Добавить слово", callback_data="add"),
-            InlineKeyboardButton(text="📚 Словарь", callback_data="list")
-        ],
-        [
-            InlineKeyboardButton(text="🎯 Квиз англ→рус", callback_data="quiz"),
-            InlineKeyboardButton(text="🎯 Квиз рус→англ", callback_data="quiz_reverse")
+class VocabularyBot:
+    def __init__(self, token: str):
+        self.application = Application.builder().token(token).build()
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        """Настройка обработчиков команд"""
+        
+        # Обработчик команды /start
+        start_handler = CommandHandler('start', self.start_command)
+        
+        # Обработчик команды /words - показать словарь
+        words_handler = CommandHandler('words', self.words_command)
+        
+        # Обработчик команды /stats - статистика
+        stats_handler = CommandHandler('stats', self.stats_command)
+        
+        # Обработчик команды /add - добавить слово (с клавиатурой)
+        add_handler = CommandHandler('add', self.add_command)
+        
+        # Обработчик команды /help
+        help_handler = CommandHandler('help', self.help_command)
+        
+        # Обработчик команды /cancel - отмена
+        cancel_handler = CommandHandler('cancel', self.cancel_command)
+        
+        # ConversationHandler для добавления слов
+        add_conversation = ConversationHandler(
+            entry_points=[CommandHandler('addword', self.addword_command)],
+            states={
+                ADDING_WORD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.addword_handler)
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', self.cancel_command)],
+        )
+        
+        # Обработчик обычных сообщений (слово-перевод)
+        message_handler = MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            self.message_handler
+        )
+        
+        # Добавляем все обработчики
+        handlers = [
+            start_handler, words_handler, stats_handler, 
+            add_handler, help_handler, cancel_handler,
+            add_conversation, message_handler
         ]
-    ])
-
-def back_to_menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]
-    ])
-
-# ------------------ КОМАНДЫ ------------------
-@dp.message(Command("start"))
-async def start_cmd(message: Message):
-    await message.answer(
-        "🇬🇧 Английский бот\n\nВыбирайте действие:",
-        reply_markup=main_menu()
-    )
-
-@dp.message(Command("status"))  
-async def status_cmd(message: Message):
-    await message.answer(f"✅ Бот активен\n📚 Слов в словаре: {len(words)}")
-
-@dp.message(Command("words"))
-async def words_cmd(message: Message):
-    if not words:
-        await message.answer("📚 Словарь пуст!")
-        return
-    
-    text = "📚 Ваш словарь:\n\n"
-    for eng, rus in words.items():
-        text += f"• {eng} → {rus}\n"
-    
-    text += f"\nВсего слов: {len(words)}"
-    await message.answer(text)
-
-# ------------------ ОБРАБОТКА ТЕКСТА ------------------
-@dp.message(F.text)
-async def handle_text(message: Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-
-    if user_id in adding_word_users:
-        if "-" in text:
-            eng, rus = text.split("-", 1)
-            eng, rus = eng.strip().lower(), rus.strip().lower()
-            if eng and rus:
-                words[eng] = rus
-                save_words()
-                adding_word_users.discard(user_id)
-                await message.answer(
-                    f"✅ Добавлено!\n<code>{eng}</code> → <code>{rus}</code>\n\n"
-                    f"📚 Всего слов: {len(words)}",
-                    reply_markup=main_menu()
-                )
-                return
         
-        await message.answer(
-            "❌ Неверный формат\n\n"
-            "Правильно: <code>слово-перевод</code>\n"
-            "Пример: <code>computer-компьютер</code>\n\n"
-            "Попробуйте еще раз:",
-            reply_markup=back_to_menu()
+        for handler in handlers:
+            self.application.add_handler(handler)
+    
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /start"""
+        user = update.effective_user
+        welcome_text = f"""
+Привет, {user.first_name}! 👋
+
+Я помогу тебе изучать английские слова!
+
+📝 **Как добавлять слова:**
+• Напиши слово и перевод через дефис
+• Пример: `hello-привет`
+• Пример: `to learn-учить`
+
+🎯 **Доступные команды:**
+/start - начать работу
+/addword - добавить слово
+/words - мой словарь
+/stats - статистика
+/help - помощь
+
+Просто напиши слово и перевод, и я его запомню!
+        """
+        await update.message.reply_text(welcome_text)
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /help"""
+        help_text = """
+🆘 **Помощь по командам:**
+
+/start - начать работу с ботом
+/addword - добавить новое слово (пошагово)
+/words - посмотреть все слова в вашем словаре
+/stats - статистика вашего словаря
+/help - показать эту справку
+
+📝 **Формат добавления слов:**
+• Через дефис: `word-перевод`
+• Пример: `apple-яблоко`
+• Пример: `to run-бегать`
+
+💡 **Совет:** Вы можете просто писать слова в чат в формате "слово-перевод", и бот автоматически их добавит!
+        """
+        await update.message.reply_text(help_text)
+    
+    async def addword_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало процесса добавления слова"""
+        await update.message.reply_text(
+            "Введите слово и перевод через дефис:\n"
+            "Пример: computer-компьютер\n\n"
+            "Или отправьте /cancel для отмены"
         )
-        return
-
-    await message.answer("ℹ️ Используйте меню:", reply_markup=main_menu())
-
-# ------------------ CALLBACKS ------------------
-@dp.callback_query(F.data == "main_menu")
-async def main_menu_callback(callback: CallbackQuery):
-    await callback.message.edit_text(
-        "🇬🇧 Английский бот\n\nВыбирайте действие:",
-        reply_markup=main_menu()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "add")
-async def add_callback(callback: CallbackQuery):
-    adding_word_users.add(callback.from_user.id)
-    await callback.message.edit_text(
-        "📝 Введите слово и перевод через дефис:\n\n"
-        "Пример: <code>database-база данных</code>\n"
-        "Пример: <code>to learn-учить</code>",
-        reply_markup=back_to_menu()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "list")
-async def list_callback(callback: CallbackQuery):
-    if not words:
-        await callback.message.edit_text(
-            "📚 Словарь пуст!\nДобавьте слова с помощью кнопки ниже:",
-            reply_markup=main_menu()
-        )
-        await callback.answer()
-        return
+        return ADDING_WORD
     
-    # Создаем клавиатуру со словами
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    
-    # Добавляем слова с кнопками удаления
-    for eng, rus in list(words.items())[:20]:  # Показываем первые 20 слов
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"🗑️ {eng}", callback_data=f"delete:{eng}"),
-            InlineKeyboardButton(text=rus, callback_data=f"show:{eng}")
-        ])
-    
-    # Кнопка возврата
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")
-    ])
-    
-    await callback.message.edit_text(
-        f"📚 Словарь ({len(words)} слов)\n\n"
-        "Нажмите 🗑️ чтобы удалить слово:",
-        reply_markup=kb
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("delete:"))
-async def delete_callback(callback: CallbackQuery):
-    eng = callback.data.split(":", 1)[1]
-    
-    if eng in words:
-        # Сохраняем перевод для сообщения
-        rus_translation = words[eng]
+    async def addword_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик добавления слова в режиме Conversation"""
+        user_id = update.effective_user.id
+        text = update.message.text
         
-        # Удаляем слово
-        del words[eng]
-        save_words()
+        success, message = await self.process_word_addition(user_id, text)
+        await update.message.reply_text(message)
         
-        # Обновляем сообщение со словарем
-        if words:
-            # Создаем обновленную клавиатуру
-            kb = InlineKeyboardMarkup(inline_keyboard=[])
-            
-            for eng_word, rus_word in list(words.items())[:20]:
-                kb.inline_keyboard.append([
-                    InlineKeyboardButton(text=f"🗑️ {eng_word}", callback_data=f"delete:{eng_word}"),
-                    InlineKeyboardButton(text=rus_word, callback_data=f"show:{eng_word}")
-                ])
-            
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")
-            ])
-            
-            await callback.message.edit_text(
-                f"✅ Удалено: <code>{eng}</code> → <code>{rus_translation}</code>\n\n"
-                f"📚 Осталось слов: {len(words)}\n\n"
-                "Нажмите 🗑️ чтобы удалить слово:",
-                reply_markup=kb
-            )
-        else:
-            await callback.message.edit_text(
-                f"✅ Удалено: <code>{eng}</code> → <code>{rus_translation}</code>\n\n"
-                "📚 Словарь теперь пуст!",
-                reply_markup=main_menu()
-            )
-    else:
-        await callback.answer("❌ Слово уже удалено", show_alert=True)
+        return ConversationHandler.END
     
-    await callback.answer()
+    async def message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик обычных сообщений (автоматическое добавление слов)"""
+        user_id = update.effective_user.id
+        text = update.message.text
+        
+        # Проверяем формат "слово-перевод"
+        if '-' in text and len(text.split('-')) == 2:
+            success, message = await self.process_word_addition(user_id, text)
+            await update.message.reply_text(message)
+    
+    async def process_word_addition(self, user_id: int, text: str):
+        """Обработка добавления слова"""
+        try:
+            # Очищаем текст от HTML тегов
+            clean_text = self.clean_html(text)
+            
+            if '-' not in clean_text:
+                return False, "❌ **Неверный формат!**\nИспользуйте: слово-перевод\nПример: hello-привет"
+            
+            word, translation = clean_text.split('-', 1)
+            word = word.strip()
+            translation = translation.strip()
+            
+            if not word or not translation:
+                return False, "❌ **Пустое слово или перевод!**\nУбедитесь, что оба поля заполнены."
+            
+            # Добавляем в базу данных
+            success = db.add_word(user_id, word, translation)
+            
+            if success:
+                return True, f"✅ **Слово добавлено!**\n{word} - {translation}"
+            else:
+                return False, "❌ **Ошибка при сохранении!**\nПопробуйте еще раз."
+                
+        except Exception as e:
+            logger.error(f"Error processing word addition: {e}")
+            return False, "❌ **Произошла ошибка!**\nПопробуйте другой формат."
+    
+    async def words_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /words - показать словарь"""
+        user_id = update.effective_user.id
+        
+        words = db.get_user_words(user_id)
+        
+        if not words:
+            await update.message.reply_text("📝 **Ваш словарь пуст**\nДобавьте первые слова!")
+            return
+        
+        # Формируем список слов (максимум 50 для избежания переполнения)
+        word_list = "\n".join([f"• **{word}** - {trans}" for word, trans in words[:50]])
+        
+        stats = db.get_user_stats(user_id)
+        
+        response = f"""
+📚 **Ваш словарь** ({stats['total_words']} слов)
 
-@dp.callback_query(F.data.startswith("show:"))
-async def show_callback(callback: CallbackQuery):
-    eng = callback.data.split(":", 1)[1]
-    if eng in words:
-        await callback.answer(f"🔍 {eng} → {words[eng]}", show_alert=True)
-    else:
-        await callback.answer("❌ Слово не найдено", show_alert=True)
+{word_list}
+        """
+        
+        if len(words) > 50:
+            response += f"\n\n... и еще {len(words) - 50} слов"
+        
+        await update.message.reply_text(response)
+    
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /stats - статистика"""
+        user_id = update.effective_user.id
+        
+        stats = db.get_user_stats(user_id)
+        
+        stats_text = f"""
+📊 **Ваша статистика**
 
-@dp.callback_query(F.data.startswith("quiz"))
-async def quiz_callback(callback: CallbackQuery):
-    if len(words) < 2:
-        await callback.message.edit_text(
-            "❌ Нужно минимум 2 слова для квиза!\nДобавьте слова в словарь.",
-            reply_markup=main_menu()
+📝 Всего слов: **{stats['total_words']}**
+🔤 Уникальных слов: **{stats['unique_words']}**
+
+Продолжайте в том же духе! 💪
+        """
+        
+        await update.message.reply_text(stats_text)
+    
+    async def add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /add (устаревшая)"""
+        await update.message.reply_text(
+            "Команда /add устарела. Используйте /addword для пошагового добавления "
+            "или просто пишите слова в формате 'слово-перевод' в чат!"
         )
-        await callback.answer()
+    
+    async def cancel_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик команды /cancel"""
+        await update.message.reply_text(
+            "Действие отменено.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
+    def clean_html(self, text: str) -> str:
+        """Очистка текста от HTML тегов"""
+        soup = BeautifulSoup(text, 'html.parser')
+        return soup.get_text().strip()
+    
+    def run(self):
+        """Запуск бота"""
+        logger.info("Бот запущен...")
+        self.application.run_polling()
+
+def main():
+    """Основная функция"""
+    
+    # Токен бота (замените на свой)
+    BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # ← ЗАМЕНИТЕ НА ВАШ ТОКЕН!
+    
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ ОШИБКА: Замените BOT_TOKEN на ваш реальный токен бота!")
+        print("1. Получите токен у @BotFather в Telegram")
+        print("2. Откройте файл bot.py")
+        print("3. Замените 'YOUR_BOT_TOKEN_HERE' на ваш токен")
         return
     
-    reverse = callback.data == "quiz_reverse"
-    eng = random.choice(list(words.keys()))
-    rus = words[eng]
-    
-    # Создаем варианты ответов
-    correct = rus if not reverse else eng
-    options = [correct]
-    
-    # Добавляем случайные неправильные варианты
-    while len(options) < 4:
-        random_word = random.choice(list(words.keys()))
-        wrong_option = words[random_word] if not reverse else random_word
-        if wrong_option not in options and wrong_option != correct:
-            options.append(wrong_option)
-    
-    random.shuffle(options)
-    
-    # Создаем клавиатуру с вариантами
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for option in options:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=option, callback_data=f"answer:{option}")
-        ])
-    
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Отмена", callback_data="main_menu")
-    ])
-    
-    question = eng if not reverse else rus
-    question_type = "английского" if reverse else "русского"
-    
-    await callback.message.edit_text(
-        f"🎯 Выберите перевод {question_type} слова:\n\n<b>{question}</b>",
-        reply_markup=kb
-    )
-    
-    current_quiz[callback.from_user.id] = (eng, rus, reverse)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("answer:"))
-async def answer_callback(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id not in current_quiz:
-        await callback.answer("❌ Квиз устарел", show_alert=True)
-        return
-    
-    user_answer = callback.data.split(":", 1)[1]
-    eng, rus, reverse = current_quiz[user_id]
-    correct = rus if not reverse else eng
-    
-    if user_answer == correct:
-        response = f"✅ Верно!\n\n<b>{eng}</b> → <i>{rus}</i>"
-    else:
-        response = f"❌ Неправильно!\n\n✅ <b>{eng}</b> → <i>{rus}</i>"
-    
-    del current_quiz[user_id]
-    await callback.message.edit_text(response, reply_markup=main_menu())
-    await callback.answer()
-
-# ------------------ WEB SERVER ------------------
-async def health_check(request):
-    return web.Response(text="🤖 Bot is running!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    app.router.add_get("/health", health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    
-    logger.info(f"🌐 Web server started on port {port}")
-    return app
-
-# ------------------ ЗАПУСК ------------------
-async def main():
-    logger.info("🚀 Starting bot...")
-    
-    # Сброс вебхука
     try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Webhook reset")
-        await asyncio.sleep(2)
+        bot = VocabularyBot(BOT_TOKEN)
+        bot.run()
     except Exception as e:
-        logger.error(f"❌ Webhook error: {e}")
-    
-    # Запуск веб-сервера
-    await start_web_server()
-    
-    # Запуск бота
-    logger.info("✅ Starting polling...")
-    await dp.start_polling(bot)
+        logger.error(f"Ошибка запуска бота: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
