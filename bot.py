@@ -303,11 +303,26 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_keyboard()
         )
 
-# Прямое добавление слов
+# Прямое добавление слов (ИСПРАВЛЕННАЯ ФУНКЦИЯ)
 async def direct_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик прямых сообщений (слово-перевод)"""
     text = update.message.text
     user_id = update.effective_user.id
     
+    # Игнорируем сообщения, которые являются ответами в квизе
+    if user_id in user_quiz:
+        return
+    
+    # Игнорируем кнопки меню
+    menu_buttons = [
+        "➕ Добавить слово", "📚 Мой словарь", "⏰ Квиз англ → рус",
+        "⏰ Квиз рус → англ", "📊 Статистика", "🗑️ Удалить слово",
+        "ℹ️ Помощь", "🏠 Главное меню"
+    ]
+    if text in menu_buttons:
+        return
+    
+    # Обрабатываем только сообщения в формате слово-перевод
     if '-' in text and len(text.split('-')) == 2:
         word, trans = text.split('-', 1)
         word = word.strip()
@@ -380,7 +395,7 @@ def main():
     app.add_handler(quiz_en_ru_conv)
     app.add_handler(quiz_ru_en_conv)
     
-    # Прямые сообщения
+    # Прямые сообщения (исправленные)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, direct_message))
     
     logger.info("🤖 Бот запускается...")
