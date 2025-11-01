@@ -24,15 +24,22 @@ dp = Dispatcher()
 
 # ------------------ ЗАГРУЗКА СЛОВАРЯ ------------------
 if os.path.exists(WORDS_FILE):
-    with open(WORDS_FILE, "r", encoding="utf-8") as f:
-        words: Dict[str, str] = json.load(f)
+    try:
+        with open(WORDS_FILE, "r", encoding="utf-8") as f:
+            words: Dict[str, str] = json.load(f)
+    except Exception:
+        logging.exception("Can't load words.json, starting with empty dict")
+        words = {}
 else:
     words = {}  # структура: { "english": "русский" }
 
 # ------------------ СОХРАНЕНИЕ ------------------
 def save_words():
-    with open(WORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(words, f, ensure_ascii=False, indent=2)
+    try:
+        with open(WORDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(words, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logging.exception("Failed to save words.json")
 
 # ------------------ СТАТЫ/СЛУЖЕБНЫЕ СЛОВАРИ ------------------
 adding_word_users = set()  # user_id добавляет слово (ожидаем текст "eng-rus")
@@ -53,8 +60,10 @@ def list_words_kb():
     kb = InlineKeyboardMarkup(row_width=2)
     # добавляем по одной кнопке на слово (callback удаление)
     for eng, rus in words.items():
-        kb.add(InlineKeyboardButton(text=f"{eng} → {rus}", callback_data=f"show:{eng}"),
-               InlineKeyboardButton(text="Удалить", callback_data=f"del:{eng}"))
+        kb.add(
+            InlineKeyboardButton(text=f"{eng} → {rus}", callback_data=f"show:{eng}"),
+            InlineKeyboardButton(text="Удалить", callback_data=f"del:{eng}")
+        )
     return kb
 
 def quiz_options_kb(options):
@@ -112,7 +121,7 @@ async def text_router(message: Message):
             return
         words[eng] = rus
         save_words()
-        adding_word_users.remove(user_id)
+        adding_word_users.discard(user_id)
         await message.answer(f"✅ Слово '{eng}' → '{rus}' добавлено!", reply_markup=main_menu_kb())
         return
 
@@ -161,10 +170,15 @@ async def send_quiz(message: Message, reverse: bool = False):
     # озвучка английского (если прямой квиз)
     if not reverse:
         try:
+            # используем уникальное имя файла на пользователя, чтобы избежать конфликтов
+            filename = f"word_{message.from_user.id}.mp3"
             tts = gTTS(text=eng, lang='en')
-            tts.save("word.mp3")
-            await message.answer_voice(InputFile("word.mp3"))
-            os.remove("word.mp3")
+            tts.save(filename)
+            await message.answer_voice(InputFile(filename))
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
         except Exception as e:
             logging.exception("TTS failed: %s", e)
 
@@ -174,15 +188,36 @@ async def send_quiz(message: Message, reverse: bool = False):
 @dp.callback_query(F.data.startswith("cmd:"))
 async def cmd_buttons_handler(callback: CallbackQuery):
     cmd = callback.data.split(":", 1)[1]
-    user_msg = callback.message
+
+    # для действий, которые ожидают "Message", мы НЕ передаём callback.message в качестве замены
+    # а действуем от имени пользователя, использующего callback.from_user
     if cmd == "add":
-        await cmd_add(user_msg)
+        # пометить реального пользователя как добавляющего слово
+        adding_word_users.add(callback.from_user.id)
+        # отправляем подсказку в тот чат, где нажата кнопка (или в личку)
+        try:
+            # если это приватный чат — ответим там, иначе отправим пользователю в ЛС
+            if callback.message.chat.type == "private":
+                await callback.message.answer("Введите слово и перевод через дефис (пример: apple-яблоко):")
+            else:
+                # отправим лично пользователю (лучше — чтобы он писал в личке)
+                await bot.send_message(callback.from_user.id, "Введите слово и перевод через дефис (пример: apple-яблоко):")
+                await callback.message.answer("Я отправил тебе в личку инструкцию. Проверь сообщения.")
+        except Exception:
+            # fallback: отправим в тот же чат
+            await callback.message.answer("Введите слово и перевод через дефис (пример: apple-яблоко):")
     elif cmd == "list":
-        await cmd_list(user_msg)
+        # покажем список слов в том же чате
+        if not words:
+            await callback.message.answer("Словарь пуст! /add чтобы добавить слово.")
+        else:
+            await callback.message.answer("Ваш словарь (нажмите на слово, чтобы показать или удалить):", reply_markup=list_words_kb())
     elif cmd == "quiz":
-        await cmd_quiz(user_msg)
+        # запустить квиз — создаём фейковое Message-like поведение? проще — отправляем запрос в тот же чат
+        await send_quiz(callback.message, reverse=False)
     elif cmd == "quiz_reverse":
-        await cmd_quiz_reverse(user_msg)
+        await send_quiz(callback.message, reverse=True)
+
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("answer:"))
@@ -236,22 +271,27 @@ async def start_web_server():
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 8080)))
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
+    logging.info("Web server started on port %s", port)
 
 # ------------------ ЗАПУСК ------------------
 async def main():
     # Запускаем HTTP-заглушку и polling
     await start_web_server()
     logging.info("Starting polling...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        # корректное завершение бота
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    finally:
-        # корректное завершение бота
-        try:
-            asyncio.run(bot.session.close())
-        except Exception:
-            pass
+    except KeyboardInterrupt:
+        pass
