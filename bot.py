@@ -1,180 +1,231 @@
-import json
 import logging
 import os
-from gtts import gTTS
+import random
+import json
+import asyncio
+from typing import Dict, Tuple
+
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import Message, InputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from gtts import gTTS
+from aiohttp import web
 
-# -----------------------
-# Настройки
-# -----------------------
-TOKEN = os.getenv("BOT_TOKEN")  # помести токен в переменные окружения
+# ------------------ НАСТРОЙКА ------------------
+TOKEN = os.getenv("BOT_TOKEN")
 WORDS_FILE = "words.json"
-logging.basicConfig(level=logging.INFO)
 
+if not TOKEN:
+    raise ValueError("❌ BOT_TOKEN не найден!")
+
+# ------------------ ЛОГИ ------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ------------------ ИНИЦИАЛИЗАЦИЯ ------------------
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# -----------------------
-# Работа со словами
-# -----------------------
+# ------------------ СЛОВАРЬ ------------------
 def load_words():
+    global words
     try:
-        with open(WORDS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
+        if os.path.exists(WORDS_FILE):
+            with open(WORDS_FILE, "r", encoding="utf-8") as f:
+                words = json.load(f)
+            logger.info(f"📚 Слов в словаре: {len(words)}")
+        else:
+            words = {
+                "hello": "привет",
+                "task": "задача", 
+                "project": "проект",
+                "team": "команда"
+            }
+            with open(WORDS_FILE, "w", encoding="utf-8") as f:
+                json.dump(words, f, ensure_ascii=False, indent=2)
+            logger.info("📚 Создан новый словарь")
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки: {e}")
+        words = {}
 
-def save_words(words):
-    with open(WORDS_FILE, "w", encoding="utf-8") as f:
-        json.dump(words, f, ensure_ascii=False, indent=4)
+def save_words():
+    try:
+        with open(WORDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(words, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения: {e}")
 
-# -----------------------
-# Команды
-# -----------------------
+# ------------------ СОСТОЯНИЯ ------------------
+adding_word_users = set()
+current_quiz: Dict[int, Tuple[str, str, bool]] = {}
 
+load_words()
+
+# ------------------ КЛАВИАТУРЫ ------------------
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ Добавить слово", callback_data="add"),
+            InlineKeyboardButton(text="📚 Словарь", callback_data="list")
+        ],
+        [
+            InlineKeyboardButton(text="🎯 Квиз англ→рус", callback_data="quiz"),
+            InlineKeyboardButton(text="🎯 Квиз рус→англ", callback_data="quiz_reverse")
+        ]
+    ])
+
+# ------------------ КОМАНДЫ ------------------
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("Добавить слово", callback_data="add"),
-        InlineKeyboardButton("Удалить слово", callback_data="delete"),
-        InlineKeyboardButton("Квиз", callback_data="quiz"),
-        InlineKeyboardButton("TTS", callback_data="tts")
+async def start_cmd(message: Message):
+    await message.answer(
+        "🇬🇧 Английский бот\nВыбирайте действие:",
+        reply_markup=main_menu()
     )
-    await message.answer("Выберите действие:", reply_markup=kb)
 
-# -----------------------
-# Добавление слова
-# -----------------------
-@dp.callback_query(lambda c: c.data == "add")
-async def add_word_start(callback: types.CallbackQuery):
-    await callback.message.answer("Введите слово и перевод через двоеточие, например:\nhello:привет")
-    await callback.answer()
-    dp.message.register(add_word_handler, F.text, state=None)
+@dp.message(Command("status"))  
+async def status_cmd(message: Message):
+    await message.answer(f"✅ Бот активен\n📚 Слов в словаре: {len(words)}")
 
-async def add_word_handler(message: types.Message):
+# ------------------ ТЕКСТ ------------------
+@dp.message(F.text)
+async def handle_text(message: Message):
+    user_id = message.from_user.id
     text = message.text.strip()
-    if ":" not in text:
-        await message.answer("Неверный формат. Используйте слово:перевод")
-        return
-    word, translation = map(str.strip, text.split(":", 1))
-    words = load_words()
-    words[word] = translation
-    save_words(words)
-    await message.answer(f"✅ Слово '{word}' добавлено!")
 
-# -----------------------
-# Удаление слова
-# -----------------------
-@dp.callback_query(lambda c: c.data == "delete")
-async def delete_word_start(callback: types.CallbackQuery):
-    words = load_words()
+    if user_id in adding_word_users:
+        if "-" in text:
+            eng, rus = text.split("-", 1)
+            eng, rus = eng.strip().lower(), rus.strip().lower()
+            if eng and rus:
+                words[eng] = rus
+                save_words()
+                adding_word_users.discard(user_id)
+                await message.answer(
+                    f"✅ '{eng}' → '{rus}'\n📚 Всего слов: {len(words)}",
+                    reply_markup=main_menu()
+                )
+                return
+        await message.answer("❌ Формат: apple-яблоко\nПопробуйте:")
+        return
+
+    await message.answer("ℹ️ Используйте меню:", reply_markup=main_menu())
+
+# ------------------ CALLBACKS ------------------
+@dp.callback_query(F.data == "add")
+async def add_callback(callback: CallbackQuery):
+    adding_word_users.add(callback.from_user.id)
+    await callback.message.edit_text(
+        "📝 Введите слово и перевод:\nПример: <code>database-база данных</code>"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "list")
+async def list_callback(callback: CallbackQuery):
     if not words:
-        await callback.message.answer("Словарь пуст!")
+        await callback.message.edit_text("📚 Словарь пуст!")
         await callback.answer()
         return
-
-    kb = InlineKeyboardBuilder()
-    for w in words.keys():
-        kb.button(text=w, callback_data=f"delete_{w}")
-    await callback.message.answer("Выберите слово для удаления:", reply_markup=kb.as_markup())
+    
+    text = "📚 Ваш словарь:\n\n"
+    for eng, rus in list(words.items())[:15]:
+        text += f"• <b>{eng}</b> - {rus}\n"
+    
+    await callback.message.edit_text(text)
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith("delete_"))
-async def delete_word(callback: types.CallbackQuery):
-    word = callback.data[len("delete_"):]
-    words = load_words()
-    if word in words:
-        words.pop(word)
-        save_words(words)
-        await callback.message.answer(f"✅ Слово '{word}' удалено!")
-    else:
-        await callback.message.answer("❌ Слово не найдено.")
-    await callback.answer()
-
-# -----------------------
-# TTS
-# -----------------------
-@dp.callback_query(lambda c: c.data == "tts")
-async def tts_start(callback: types.CallbackQuery):
-    words = load_words()
-    if not words:
-        await callback.message.answer("Словарь пуст!")
+@dp.callback_query(F.data.startswith("quiz"))
+async def quiz_callback(callback: CallbackQuery):
+    if len(words) < 2:
+        await callback.message.edit_text("❌ Нужно минимум 2 слова!")
         await callback.answer()
         return
-
-    kb = InlineKeyboardBuilder()
-    for w in words.keys():
-        kb.button(text=w, callback_data=f"tts_{w}")
-    await callback.message.answer("Выберите слово для озвучки:", reply_markup=kb.as_markup())
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data.startswith("tts_"))
-async def tts_word(callback: types.CallbackQuery):
-    word = callback.data[len("tts_"):]
-    words = load_words()
-    if word not in words:
-        await callback.message.answer("Слово не найдено!")
-        await callback.answer()
-        return
-
-    tts = gTTS(word, lang="en")
-    filename = f"tts_{word}.mp3"
-    tts.save(filename)
-    await callback.message.answer_audio(open(filename, "rb"))
-    os.remove(filename)
-    await callback.answer()
-
-# -----------------------
-# Квиз
-# -----------------------
-@dp.callback_query(lambda c: c.data == "quiz")
-async def quiz_start(callback: types.CallbackQuery):
-    words = load_words()
-    if not words:
-        await callback.message.answer("Словарь пуст!")
-        await callback.answer()
-        return
-
-    import random
-    word, translation = random.choice(list(words.items()))
-    kb = InlineKeyboardMarkup(row_width=2)
-    options = list(words.values())
-    if translation not in options:
-        options.append(translation)
+    
+    reverse = callback.data == "quiz_reverse"
+    eng = random.choice(list(words.keys()))
+    rus = words[eng]
+    
+    correct = rus if not reverse else eng
+    options = [correct]
+    
+    while len(options) < 4:
+        word = random.choice(list(words.keys()))
+        option = words[word] if not reverse else word
+        if option not in options and option != correct:
+            options.append(option)
+    
     random.shuffle(options)
-    for opt in options[:4]:
-        kb.add(InlineKeyboardButton(opt, callback_data=f"quiz_{word}_{opt}"))
-    await callback.message.answer(f"Выберите правильный перевод для слова '{word}':", reply_markup=kb)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    for opt in options:
+        kb.inline_keyboard.append([InlineKeyboardButton(text=opt, callback_data=f"ans:{opt}")])
+    
+    question = eng if not reverse else rus
+    await callback.message.edit_text(
+        f"🎯 Выберите перевод:\n<b>{question}</b>",
+        reply_markup=kb
+    )
+    
+    current_quiz[callback.from_user.id] = (eng, rus, reverse)
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith("quiz_"))
-async def quiz_answer(callback: types.CallbackQuery):
-    _, word, answer = callback.data.split("_", 2)
-    words = load_words()
-    correct = words.get(word)
-    if answer == correct:
-        await callback.message.answer("✅ Правильно!")
+@dp.callback_query(F.data.startswith("ans:"))
+async def answer_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in current_quiz:
+        await callback.answer("❌ Квиз устарел")
+        return
+    
+    user_ans = callback.data.split(":", 1)[1]
+    eng, rus, reverse = current_quiz[user_id]
+    correct = rus if not reverse else eng
+    
+    if user_ans == correct:
+        response = f"✅ Верно!\n<b>{eng}</b> - {rus}"
     else:
-        await callback.message.answer(f"❌ Неправильно! Правильный ответ: {correct}")
+        response = f"❌ Неправильно!\n✅ <b>{eng}</b> - {rus}"
+    
+    del current_quiz[user_id]
+    await callback.message.edit_text(response, reply_markup=main_menu())
     await callback.answer()
 
-# -----------------------
-# Запуск бота
-# -----------------------
+# ------------------ WEB SERVER ------------------
+async def health_check(request):
+    return web.Response(text="🤖 Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # 🔥 ВАЖНО: Используем порт 8080 для Render
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    logger.info(f"🌐 Web server started on port {port}")
+    return app
+
+# ------------------ ЗАПУСК ------------------
+async def main():
+    logger.info("🚀 Starting bot...")
+    
+    # Сброс вебхука
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook reset")
+        await asyncio.sleep(2)
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+    
+    # Запуск веб-сервера
+    await start_web_server()
+    
+    # Запуск бота
+    logger.info("✅ Starting polling...")
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    import asyncio
-    from aiogram import exceptions
-
-    async def main():
-        try:
-            await dp.start_polling(bot)
-        except exceptions.TelegramRetryAfter as e:
-            logging.error(f"TelegramRetryAfter: {e}")
-        except Exception as e:
-            logging.exception("Ошибка при запуске бота")
-
     asyncio.run(main())
