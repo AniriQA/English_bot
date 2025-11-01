@@ -5,7 +5,8 @@
 
 import sqlite3
 import logging
-from typing import List, Tuple
+import random
+from typing import List, Tuple, Dict, Any
 import os
 
 # Настройка логирования
@@ -67,7 +68,7 @@ class VocabularyDatabase:
             logger.error(f"Ошибка получения слов пользователя {user_id}: {e}")
             return []
     
-    def get_user_stats(self, user_id: int) -> dict:
+    def get_user_stats(self, user_id: int) -> Dict[str, Any]:
         """Получение статистики пользователя"""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -77,10 +78,62 @@ class VocabularyDatabase:
                 ''', (user_id,))
                 total_words = cursor.fetchone()[0]
                 
+                cursor.execute('''
+                    SELECT COUNT(DISTINCT word) FROM user_vocabulary WHERE user_id = ?
+                ''', (user_id,))
+                unique_words = cursor.fetchone()[0]
+                
                 return {
                     'total_words': total_words,
-                    'unique_words': total_words  # для простоты
+                    'unique_words': unique_words
                 }
         except Exception as e:
             logger.error(f"Ошибка получения статистики: {e}")
             return {'total_words': 0, 'unique_words': 0}
+    
+    def delete_word(self, user_id: int, word: str) -> bool:
+        """Удаление слова из словаря пользователя"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM user_vocabulary 
+                    WHERE user_id = ? AND word = ?
+                ''', (user_id, word))
+                conn.commit()
+                deleted = cursor.rowcount > 0
+                if deleted:
+                    logger.info(f"Удалено слово для user_id {user_id}: {word}")
+                return deleted
+        except Exception as e:
+            logger.error(f"Ошибка удаления слова: {e}")
+            return False
+    
+    def get_random_words_for_quiz(self, user_id: int, limit: int = 4) -> List[Tuple[str, str]]:
+        """Получение случайных слов для квиза"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT word, translation FROM user_vocabulary 
+                    WHERE user_id = ? 
+                    ORDER BY RANDOM() 
+                    LIMIT ?
+                ''', (user_id, limit))
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Ошибка получения слов для квиза: {e}")
+            return []
+    
+    def get_word_count(self, user_id: int) -> int:
+        """Получение количества слов пользователя"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT COUNT(*) FROM user_vocabulary WHERE user_id = ?
+                ''', (user_id,))
+                return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Ошибка получения количества слов: {e}")
+            return 0
