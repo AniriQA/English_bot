@@ -16,7 +16,10 @@ TOKEN = os.getenv("BOT_TOKEN")  # токен задаётся в Render → Envi
 WORDS_FILE = "words.json"
 
 # ------------------ ЛОГИ ------------------
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # ------------------ ИНИЦИАЛИЗАЦИЯ ------------------
@@ -343,22 +346,38 @@ async def handle(request):
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle)
+    app.router.add_get("/health", handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"Web server started on port {port}")
 
-# ------------------ ЗАПУСК ------------------
+# ------------------ ЗАПУСК С ОБРАБОТКОЙ ОШИБОК ------------------
 async def main():
     # Загружаем слова при старте
     load_words()
     
-    # Запускаем HTTP-заглушку и polling
+    # Запускаем HTTP-заглушку
     await start_web_server()
-    logger.info("Starting polling...")
-    await dp.start_polling(bot)
+    
+    # Запускаем бота с обработкой ошибок
+    logger.info("Starting bot polling...")
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Bot polling failed: {e}")
+        # При конфликте - ждем и пробуем снова
+        if "Conflict" in str(e):
+            logger.info("Waiting 10 seconds and trying again...")
+            await asyncio.sleep(10)
+            await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
