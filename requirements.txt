@@ -1,3 +1,4 @@
-aiogram>=3.1.1
-aiohttp==3.8.6
-gTTS
+aiogram==3.17.0
+gTTS==2.5.1
+aiohttp==3.9.1
+python-dotenv==1.0.0
