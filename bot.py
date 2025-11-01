@@ -12,7 +12,7 @@ from gtts import gTTS
 from aiohttp import web
 
 # ------------------ НАСТРОЙКА ------------------
-TOKEN = os.getenv("BOT_TOKEN")  # токен задаётся в Render → Environment
+TOKEN = os.getenv("BOT_TOKEN")
 WORDS_FILE = "words.json"
 
 # ------------------ ЛОГИ ------------------
@@ -28,7 +28,6 @@ dp = Dispatcher()
 
 # ------------------ ЗАГРУЗКА СЛОВАРЯ ------------------
 def load_words():
-    """Загрузка слов из файла с обработкой ошибок"""
     global words
     try:
         if os.path.exists(WORDS_FILE):
@@ -42,142 +41,95 @@ def load_words():
         logger.error(f"Ошибка загрузки словаря: {e}")
         words = {}
 
-# ------------------ СОХРАНЕНИЕ ------------------
 def save_words():
-    """Сохранение слов в файл с обработкой ошибок"""
     try:
         with open(WORDS_FILE, "w", encoding="utf-8") as f:
             json.dump(words, f, ensure_ascii=False, indent=2)
-        logger.info(f"Словарь сохранен ({len(words)} слов)")
     except Exception as e:
         logger.error(f"Ошибка сохранения словаря: {e}")
 
-# ------------------ СТАТЫ/СЛУЖЕБНЫЕ СЛОВАРИ ------------------
-adding_word_users = set()  # user_id добавляет слово (ожидаем текст "eng-rus")
-current_quiz: Dict[int, Tuple[str, str, bool]] = {}  # {user_id: (eng, rus, reverse)}
+# ------------------ СТАТЫ ------------------
+adding_word_users = set()
+current_quiz: Dict[int, Tuple[str, str, bool]] = {}
 
-# Загружаем слова при старте
 load_words()
 
-# ------------------ УТИЛИТЫ ДЛЯ КЛАВИАТУР ------------------
+# ------------------ КЛАВИАТУРЫ ------------------
 def main_menu_kb():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="➕ Добавить слово", callback_data="cmd:add"),
-            InlineKeyboardButton(text="📝 Посмотреть словарь", callback_data="cmd:list")
+            InlineKeyboardButton(text="📝 Словарь", callback_data="cmd:list")
         ],
         [
             InlineKeyboardButton(text="❓ Квиз (англ → рус)", callback_data="cmd:quiz"),
             InlineKeyboardButton(text="❓ Квиз (рус → англ)", callback_data="cmd:quiz_reverse")
         ]
     ])
-    return kb
 
 def list_words_kb():
     kb = InlineKeyboardMarkup(inline_keyboard=[])
-    # добавляем по одной кнопке на слово (callback удаление)
-    for eng, rus in list(words.items())[:50]:  # ограничиваем показ до 50 слов
+    for eng, rus in list(words.items())[:30]:
         kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"{eng} → {rus}", callback_data=f"show:{eng}"),
-            InlineKeyboardButton(text="❌ Удалить", callback_data=f"del:{eng}")
+            InlineKeyboardButton(text=f"{eng}", callback_data=f"show:{eng}"),
+            InlineKeyboardButton(text="❌", callback_data=f"del:{eng}")
         ])
-    
-    # Добавляем кнопку возврата в меню
     kb.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Назад в меню", callback_data="cmd:menu")
+        InlineKeyboardButton(text="🔙 Назад", callback_data="cmd:menu")
     ])
     return kb
 
 def quiz_options_kb(options):
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for opt in options:
-        # Экранируем специальные символы в callback_data
-        safe_opt = opt.replace(':', '|').replace(';', '|')
+        safe_opt = opt.replace(':', '|')
         kb.inline_keyboard.append([
             InlineKeyboardButton(text=opt, callback_data=f"answer:{safe_opt}")
         ])
     return kb
 
-def back_to_menu_kb():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад в меню", callback_data="cmd:menu")]
-    ])
-    return kb
-
 # ------------------ КОМАНДЫ ------------------
 @dp.message(Command(commands=["start"]))
 async def cmd_start(message: Message):
-    """Показываем красивое меню кнопок (inline)."""
     await message.answer(
-        "Привет! Я бот для изучения английских слов.\nВыбирай действие кнопками ниже:",
+        "Привет! Я бот для изучения английских слов.\nВыбирай действие:",
         reply_markup=main_menu_kb()
     )
 
 @dp.message(Command(commands=["add"]))
 async def cmd_add(message: Message):
     adding_word_users.add(message.from_user.id)
-    await message.answer(
-        "Введите слово и перевод через дефис (пример: apple-яблоко):",
-        reply_markup=back_to_menu_kb()
-    )
+    await message.answer("Введите слово и перевод через дефис (пример: apple-яблоко):")
 
 @dp.message(Command(commands=["list"]))
 async def cmd_list(message: Message):
     if not words:
-        await message.answer(
-            "Словарь пуст! Добавьте слова с помощью кнопки ниже:",
-            reply_markup=main_menu_kb()
-        )
+        await message.answer("Словарь пуст!", reply_markup=main_menu_kb())
         return
-    await message.answer(
-        f"Ваш словарь ({len(words)} слов):", 
-        reply_markup=list_words_kb()
-    )
+    await message.answer(f"Ваш словарь ({len(words)} слов):", reply_markup=list_words_kb())
 
-@dp.message(Command(commands=["quiz"]))
-async def cmd_quiz(message: Message):
-    await send_quiz(message, reverse=False)
-
-@dp.message(Command(commands=["quiz_reverse"]))
-async def cmd_quiz_reverse(message: Message):
-    await send_quiz(message, reverse=True)
-
-# ------------------ ДОБАВЛЕНИЕ СЛОВ ------------------
+# ------------------ ОБРАБОТКА ТЕКСТА ------------------
 @dp.message(F.text)
 async def text_router(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # 1) если пользователь сейчас добавляет слово
     if user_id in adding_word_users:
         if "-" not in text:
-            await message.answer(
-                "Неверный формат. Используйте: английское-русский (пример: apple-яблоко)\nПопробуйте еще раз:",
-                reply_markup=back_to_menu_kb()
-            )
+            await message.answer("Неверный формат. Пример: apple-яблоко\nПопробуйте еще раз:")
             return
         
         eng, rus = text.split("-", 1)
-        eng = eng.strip().lower()
-        rus = rus.strip().lower()
+        eng, rus = eng.strip().lower(), rus.strip().lower()
         
-        if not eng or not rus:
-            await message.answer(
-                "Пустая часть слова. Проверьте формат.\nПопробуйте еще раз:",
-                reply_markup=back_to_menu_kb()
-            )
-            return
-        
-        words[eng] = rus
-        save_words()
-        adding_word_users.discard(user_id)  # используем discard вместо remove для безопасности
-        await message.answer(
-            f"✅ Слово '{eng}' → '{rus}' добавлено!\nВсего слов в словаре: {len(words)}", 
-            reply_markup=main_menu_kb()
-        )
+        if eng and rus:
+            words[eng] = rus
+            save_words()
+            adding_word_users.discard(user_id)
+            await message.answer(f"✅ '{eng}' → '{rus}' добавлено! Всего: {len(words)}", 
+                               reply_markup=main_menu_kb())
         return
 
-    # 2) если у пользователя открыт квиз и он ввёл текст вместо кнопки
     if user_id in current_quiz:
         eng, rus, reverse = current_quiz[user_id]
         user_answer = text.strip().lower()
@@ -186,57 +138,40 @@ async def text_router(message: Message):
         if user_answer == correct:
             response = f"✅ Верно! '{eng}' → '{rus}'"
         else:
-            response = f"❌ Неправильно. Правильный ответ: '{correct}'"
-            # Удаляем слово только если ответ неверный
+            response = f"❌ Неправильно. Правильно: '{correct}'"
             if not reverse and eng in words:
                 del words[eng]
                 save_words()
-                response += f"\nСлово '{eng}' удалено из словаря."
+                response += f"\nСлово '{eng}' удалено."
         
         del current_quiz[user_id]
         await message.answer(response, reply_markup=main_menu_kb())
         return
 
-    # 3) никакой режим — отправляем меню
-    await message.answer("Используйте меню для навигации:", reply_markup=main_menu_kb())
+    await message.answer("Используйте меню:", reply_markup=main_menu_kb())
 
 # ------------------ КВИЗ ------------------
 async def send_quiz(message: Message, reverse: bool = False):
     if len(words) < 2:
-        await message.answer(
-            "Добавьте хотя бы 2 слова для квиза!", 
-            reply_markup=main_menu_kb()
-        )
+        await message.answer("Добавьте хотя бы 2 слова!", reply_markup=main_menu_kb())
         return
 
-    # Создаем копию ключей для избежания изменения во время итерации
     word_keys = list(words.keys())
     eng = random.choice(word_keys)
     rus = words[eng]
 
-    options = []
-    correct = rus if not reverse else eng
-    options.append(correct)
-    
-    # собираем варианты (строки)
+    options = [rus if not reverse else eng]
     while len(options) < 4:
         w = random.choice(word_keys)
         val = words[w] if not reverse else w
-        if val not in options and val != correct:
+        if val not in options and val != options[0]:
             options.append(val)
     
     random.shuffle(options)
-
     question = eng if not reverse else rus
-    question_type = "английского" if reverse else "русского"
 
-    # отправляем вопрос с inline-кнопками
-    await message.answer(
-        f"Выберите правильный перевод {question_type} слова: <b>{question}</b>", 
-        reply_markup=quiz_options_kb(options)
-    )
+    await message.answer(f"Выберите перевод: <b>{question}</b>", reply_markup=quiz_options_kb(options))
     
-    # озвучка английского (если прямой квиз)
     if not reverse:
         try:
             tts = gTTS(text=eng, lang='en')
@@ -244,53 +179,39 @@ async def send_quiz(message: Message, reverse: bool = False):
             await message.answer_voice(InputFile("word.mp3"))
             os.remove("word.mp3")
         except Exception as e:
-            logger.error(f"TTS failed: {e}")
-            # Не прерываем выполнение если TTS не работает
+            logger.error(f"TTS error: {e}")
 
     current_quiz[message.from_user.id] = (eng, rus, reverse)
 
-# ------------------ CALLBACKS (кнопки) ------------------
+# ------------------ CALLBACKS ------------------
 @dp.callback_query(F.data.startswith("cmd:"))
-async def cmd_buttons_handler(callback: CallbackQuery):
+async def cmd_handler(callback: CallbackQuery):
     cmd = callback.data.split(":", 1)[1]
-    user_msg = callback.message
     
     if cmd == "add":
         adding_word_users.add(callback.from_user.id)
-        await user_msg.edit_text(
-            "Введите слово и перевод через дефис (пример: apple-яблоко):",
-            reply_markup=back_to_menu_kb()
-        )
+        await callback.message.edit_text("Введите слово и перевод через дефис (пример: apple-яблоко):")
     elif cmd == "list":
         if not words:
-            await user_msg.edit_text(
-                "Словарь пуст! Добавьте слова с помощью кнопки ниже:",
-                reply_markup=main_menu_kb()
-            )
+            await callback.message.edit_text("Словарь пуст!", reply_markup=main_menu_kb())
         else:
-            await user_msg.edit_text(
-                f"Ваш словарь ({len(words)} слов):", 
-                reply_markup=list_words_kb()
-            )
+            await callback.message.edit_text(f"Ваш словарь ({len(words)} слов):", reply_markup=list_words_kb())
     elif cmd == "quiz":
-        await user_msg.delete()  # Удаляем старое сообщение
-        await send_quiz(user_msg, reverse=False)
+        await callback.message.delete()
+        await send_quiz(callback.message, False)
     elif cmd == "quiz_reverse":
-        await user_msg.delete()  # Удаляем старое сообщение
-        await send_quiz(user_msg, reverse=True)
+        await callback.message.delete()
+        await send_quiz(callback.message, True)
     elif cmd == "menu":
-        await user_msg.edit_text(
-            "Главное меню:",
-            reply_markup=main_menu_kb()
-        )
+        await callback.message.edit_text("Главное меню:", reply_markup=main_menu_kb())
     
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("answer:"))
-async def answer_callback(callback: CallbackQuery):
+async def answer_handler(callback: CallbackQuery):
     user_id = callback.from_user.id
     if user_id not in current_quiz:
-        await callback.answer("Квиз устарел. Начните новый!", show_alert=True)
+        await callback.answer("Начните новый квиз!", show_alert=True)
         return
 
     eng, rus, reverse = current_quiz[user_id]
@@ -300,48 +221,39 @@ async def answer_callback(callback: CallbackQuery):
     if user_answer == correct:
         response = f"✅ Верно! '{eng}' → '{rus}'"
     else:
-        response = f"❌ Неправильно. Правильный ответ: '{correct}'"
-        # Удаляем слово только если ответ неверный
+        response = f"❌ Неправильно. Правильно: '{correct}'"
         if not reverse and eng in words:
             del words[eng]
             save_words()
-            response += f"\nСлово '{eng}' удалено из словаря."
+            response += f"\nСлово '{eng}' удалено."
 
     await callback.message.edit_text(response, reply_markup=main_menu_kb())
     del current_quiz[user_id]
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("show:"))
-async def show_word_callback(callback: CallbackQuery):
+async def show_handler(callback: CallbackQuery):
     eng = callback.data.split(":", 1)[1]
     if eng in words:
         await callback.answer(f"{eng} → {words[eng]}", show_alert=True)
     else:
-        await callback.answer("Слово не найдено.", show_alert=True)
+        await callback.answer("Слово не найдено", show_alert=True)
 
 @dp.callback_query(F.data.startswith("del:"))
-async def delete_word_callback(callback: CallbackQuery):
+async def delete_handler(callback: CallbackQuery):
     eng = callback.data.split(":", 1)[1]
     if eng in words:
         del words[eng]
         save_words()
-        # Обновляем сообщение со списком слов
         if words:
-            await callback.message.edit_text(
-                f"🗑️ Слово '{eng}' удалено. Осталось слов: {len(words)}", 
-                reply_markup=list_words_kb()
-            )
+            await callback.message.edit_text(f"🗑️ '{eng}' удалено. Осталось: {len(words)}", reply_markup=list_words_kb())
         else:
-            await callback.message.edit_text(
-                "Словарь теперь пуст!",
-                reply_markup=main_menu_kb()
-            )
-    else:
-        await callback.answer("Слово уже было удалено.", show_alert=True)
+            await callback.message.edit_text("Словарь пуст!", reply_markup=main_menu_kb())
+    await callback.answer()
 
-# ------------------ HTTP-заглушка для Render ------------------
+# ------------------ WEB SERVER ------------------
 async def handle(request):
-    return web.Response(text="Bot is alive!")
+    return web.Response(text="Bot is running!")
 
 async def start_web_server():
     app = web.Application()
@@ -352,32 +264,34 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Web server started on port {port}")
+    logger.info(f"Web server on port {port}")
 
-# ------------------ ЗАПУСК С ОБРАБОТКОЙ ОШИБОК ------------------
+# ------------------ ЗАПУСК ------------------
+async def reset_bot():
+    """Принудительный сброс перед запуском"""
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook reset successfully")
+        await asyncio.sleep(2)
+    except Exception as e:
+        logger.error(f"Reset error: {e}")
+
 async def main():
-    # Загружаем слова при старте
-    load_words()
+    # Сначала сбрасываем вебхук
+    await reset_bot()
     
-    # Запускаем HTTP-заглушку
+    # Запускаем веб-сервер
     await start_web_server()
     
-    # Запускаем бота с обработкой ошибок
-    logger.info("Starting bot polling...")
+    # Запускаем бота
+    logger.info("Starting bot...")
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        logger.error(f"Bot polling failed: {e}")
-        # При конфликте - ждем и пробуем снова
-        if "Conflict" in str(e):
-            logger.info("Waiting 10 seconds and trying again...")
-            await asyncio.sleep(10)
-            await dp.start_polling(bot)
+        logger.error(f"Polling failed: {e}")
+        # Пробуем еще раз через 10 секунд
+        await asyncio.sleep(10)
+        await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+    asyncio.run(main())
