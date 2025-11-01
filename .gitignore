@@ -1,13 +1,30 @@
-.env
+# Бот токены и конфиги
+config.py
+*.env
+.env.local
+
+# База данных SQLite
+*.db
+*.db-journal
+
+# Логи
+*.log
+logs/
+
+# Питон
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-env/
-venv/
-.venv/
-*.mp3
-*.log
+pip-log.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Системные
 .DS_Store
-words.json
+Thumbs.db
