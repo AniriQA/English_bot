@@ -187,22 +187,25 @@ async def list_callback(callback: CallbackQuery):
         await callback.answer()
         return
     
-    # КРАСИВЫЙ список слов БЕЗ HTML-тегов
-    word_list = []
-    for i, (eng, rus) in enumerate(words.items(), 1):
-        word_list.append(f"{i}. {eng} → {rus}")
+    # Создаем клавиатуру со словами и кнопками удаления
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
     
-    # Разбиваем на сообщения по 15 слов
-    chunks = [word_list[i:i + 15] for i in range(0, len(word_list), 15)]
+    # Добавляем слова с кнопками удаления
+    for eng, rus in list(words.items())[:15]:  # Показываем первые 15 слов
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text=f"🗑️ {eng}", callback_data=f"delete:{eng}"),
+            InlineKeyboardButton(text=rus, callback_data=f"show:{eng}")
+        ])
     
-    for chunk in chunks:
-        text = "📚 Ваш словарь:\n\n" + "\n".join(chunk)
-        if chunks.index(chunk) == len(chunks) - 1:  # Последнее сообщение
-            text += f"\n\nВсего слов: {len(words)}"
-            await callback.message.answer(text, reply_markup=back_to_menu())
-        else:
-            await callback.message.answer(text)
+    # Кнопка возврата
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")
+    ])
     
+    await callback.message.edit_text(
+        f"📚 Словарь ({len(words)} слов)\n\nНажмите 🗑️ чтобы удалить слово:",
+        reply_markup=kb
+    )
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete:"))
@@ -217,15 +220,42 @@ async def delete_callback(callback: CallbackQuery):
         del words[eng]
         save_words()
         
-        await callback.message.edit_text(
-            f"✅ Удалено: {eng} → {rus_translation}\n\n"
-            f"📚 Осталось слов: {len(words)}",
-            reply_markup=main_menu()
-        )
+        await callback.answer(f"✅ Удалено: {eng} → {rus_translation}")
+        
+        # Обновляем сообщение со словарем
+        if words:
+            # Создаем обновленную клавиатуру
+            kb = InlineKeyboardMarkup(inline_keyboard=[])
+            
+            for eng_word, rus_word in list(words.items())[:15]:
+                kb.inline_keyboard.append([
+                    InlineKeyboardButton(text=f"🗑️ {eng_word}", callback_data=f"delete:{eng_word}"),
+                    InlineKeyboardButton(text=rus_word, callback_data=f"show:{eng_word}")
+                ])
+            
+            kb.inline_keyboard.append([
+                InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")
+            ])
+            
+            await callback.message.edit_text(
+                f"📚 Словарь ({len(words)} слов)\n\nНажмите 🗑️ чтобы удалить слово:",
+                reply_markup=kb
+            )
+        else:
+            await callback.message.edit_text(
+                "📚 Словарь теперь пуст!",
+                reply_markup=main_menu()
+            )
     else:
         await callback.answer("❌ Слово уже удалено", show_alert=True)
-    
-    await callback.answer()
+
+@dp.callback_query(F.data.startswith("show:"))
+async def show_callback(callback: CallbackQuery):
+    eng = callback.data.split(":", 1)[1]
+    if eng in words:
+        await callback.answer(f"🔍 {eng} → {words[eng]}", show_alert=True)
+    else:
+        await callback.answer("❌ Слово не найдено", show_alert=True)
 
 @dp.callback_query(F.data.startswith("quiz"))
 async def quiz_callback(callback: CallbackQuery):
